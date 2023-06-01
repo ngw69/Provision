@@ -1,5 +1,6 @@
 module provision.symbols;
 
+import core.memory;
 import core.stdc.errno;
 import core.stdc.stdlib;
 import core.stdc.string;
@@ -8,12 +9,14 @@ import core.sys.posix.sys.stat;
 import core.sys.posix.sys.time;
 import core.sys.posix.unistd;
 import provision.androidlibrary;
+import std.algorithm.mutation;
 import std.experimental.allocator;
 import std.experimental.allocator.mallocator;
 import std.random;
-import std.stdio : stderr, writeln;
 import std.string;
 import std.traits : Parameters, ReturnType;
+
+import slf4d;
 
 __gshared:
 
@@ -38,34 +41,32 @@ private extern (C) noreturn undefinedSymbol() {
     throw new UndefinedSymbolException();
 }
 
-private extern (C) AndroidLibrary* dlopenWrapper(const char* name) {
-    stderr.writeln("Attempting to load ", name.fromStringz());
+private extern (C) AndroidLibrary dlopenWrapper(const char* name) {
+    debug {
+        getLogger().traceF!"Attempting to load %s"(name.fromStringz());
+    }
     try {
-        return Mallocator.instance.make!AndroidLibrary(cast(string) name.fromStringz());
+        auto caller = rootLibrary();
+        auto lib = new AndroidLibrary(cast(string) name.fromStringz(), caller.hooks);
+        caller.loadedLibraries ~= lib;
+        return lib;
     } catch (Throwable) {
         return null;
     }
 }
 
-private extern (C) void* dlsymWrapper(AndroidLibrary* library, const char* symbolName) {
-    stderr.writeln("Attempting to load ", symbolName.fromStringz());
+private extern (C) void* dlsymWrapper(AndroidLibrary library, const char* symbolName) {
+    debug {
+        getLogger().traceF!"Attempting to load symbol %s"(symbolName.fromStringz());
+    }
     return library.load(cast(string) symbolName.fromStringz());
 }
 
-private extern (C) void dlcloseWrapper(AndroidLibrary* library) {
-    return Mallocator.instance.dispose(library);
-}
-
-public bool doTimeTravel = false;
-public timeval targetTime;
-
-private extern (C) ReturnType!gettimeofday gettimeofday_timeTravel(timeval* timeval, void* ptr) {
-    auto ret = gettimeofday(timeval, ptr);
-    if (doTimeTravel) {
-        *timeval = targetTime;
+private extern (C) void dlcloseWrapper(AndroidLibrary library) {
+    if (library) {
+        rootLibrary().loadedLibraries.remove!((lib) => lib == library);
+        destroy(library);
     }
-
-    return ret;
 }
 
 // gperf generated code:
@@ -146,7 +147,7 @@ package void* lookupSymbol(string str) {
             {"pthread_mutex_unlock", &emptyStub},
             {"pthread_rwlock_rdlock", &emptyStub}, {
                 "gettimeofday",
-                &gettimeofday_timeTravel
+                &gettimeofday
             }, {""}, {"read", &read},
             {"mkdir", &mkdir}, {"malloc", &malloc}, {""}, {""}, {""}, {""},
             {"__system_property_get", &__system_property_get_impl}, {""}, {""},
